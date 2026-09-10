@@ -55,26 +55,45 @@ jobs:
       - name: Setup MSBuild & VS components
         uses: microsoft/setup-msbuild@v3
 
-      # WinUI 3 XAML compiler + Windows App SDK targets come from NuGet, but the
-      # Windows 11 SDK (10.0.26100.0) and the WinUI/C++ ATL workloads must be
-      # present. Install any missing VS components idempotently.
-      - name: Ensure required VS workloads (WinUI, C++ ATL, Windows SDK)
+      # WinUI 3 XAML compiler + Windows App SDK build targets come from NuGet
+      # (restored automatically), so the only hard requirement for a command-line
+      # unpackaged publish is the Windows 11 SDK 10.0.26100.0 (for the
+      # net10.0-windows10.0.26100.0 TFM / WinMD references). We install ONLY that
+      # (plus the lightweight WinUI component) and ONLY if it is missing.
+      - name: Ensure Windows 11 SDK 10.0.26100.0 (skip if already present)
         shell: pwsh
         run: |
-          $vsDir = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $vsInstaller = "$vsDir\..\..\Common7\Tools\..\..\..\Installer\setup.exe"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $setup   = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Host "vswhere not found; skipping VS component check (runner likely already has the SDK)."
+            exit 0
+          }
+          $vsDir = & $vswhere -latest -property installationPath
+          Write-Host "VS installation path: $vsDir"
+
+          # Fast path: if the SDK is already installed for this instance, do nothing.
+          $hasSdk = & $vswhere -latest -requires Microsoft.VisualStudio.Component.Windows11SDK.26100 -property installationVersion
+          if ($hasSdk) {
+            Write-Host "Windows 11 SDK 10.0.26100.0 already present. Skipping install."
+            exit 0
+          }
+
+          if (-not (Test-Path $setup)) {
+            Write-Warning "VS setup.exe not found at $setup; cannot install SDK. The build will fail if the SDK is missing."
+            exit 0
+          }
+
           $components = @(
-            "Microsoft.VisualStudio.Workload.Universal",
-            "Microsoft.VisualStudio.Component.WinUI",
             "Microsoft.VisualStudio.Component.Windows11SDK.26100",
-            "Microsoft.VisualStudio.Component.VC.ATL",
-            "Microsoft.VisualStudio.Component.MSVC.BuildTools",
-            "Microsoft.VisualStudio.ComponentGroup.WindowsAppSDK.Cs"
+            "Microsoft.VisualStudio.Component.WinUI"
           )
           $add = ($components | ForEach-Object { "--add $_" }) -join " "
-          # Try to modify; ignore non-zero if already present.
-          Start-Process -FilePath "$vsDir\..\..\Installer\setup.exe" -ArgumentList @("--quiet","--norestart",$add) -Wait -NoNewWindow
-          Write-Host "VS component check done."
+          Write-Host "Installing missing VS components: $add"
+          # --installPath makes setup MODIFY the existing instance instead of
+          # trying to install a fresh VS (which would fail without a product id).
+          $proc = Start-Process -FilePath $setup -ArgumentList @("--installPath", $vsDir, "--quiet", "--norestart", $add) -Wait -PassThru -NoNewWindow
+          Write-Host "VS setup exit code: $($proc.ExitCode)"
 
       - name: Restore
         shell: pwsh
